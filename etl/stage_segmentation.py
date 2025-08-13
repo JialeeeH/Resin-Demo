@@ -6,6 +6,7 @@ from pathlib import Path
 from utils.io import read_csv, save_df
 from utils.preprocessing import savgol_slope
 from utils.constants import STEPS, TAGS
+from etl.validation import validate_batch, validate_ts_signal
 
 def build_segments_from_events(op_event: pd.DataFrame):
     # assume events cover all steps with timestamps; build (start,end) per step per batch
@@ -49,6 +50,11 @@ def build_stage_features(ts: pd.DataFrame, segs: pd.DataFrame):
 def main():
     batch = read_csv('batch.csv')
     ts = read_csv('ts_signal.csv')
+    # fail fast if inputs do not meet expectations
+    if not validate_batch(batch)["success"]:
+        raise ValueError("batch.csv failed validation")
+    if not validate_ts_signal(ts)["success"]:
+        raise ValueError("ts_signal.csv failed validation")
     op = read_csv('op_event.csv')
     op['ts'] = pd.to_datetime(op['ts'])
     segs = build_segments_from_events(op)
