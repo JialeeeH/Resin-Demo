@@ -1,0 +1,1 @@
+Run `python etl/generate_synthetic_data.py` to create CSVs here (5 batches, 60s sampling).
