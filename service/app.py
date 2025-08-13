@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-import joblib, os, json
+import joblib, os, json, random
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
 from pathlib import Path
 from tslearn.metrics import soft_dtw
 
@@ -19,6 +20,7 @@ _proto = None
 _env_lo = None
 _env_hi = None
 _state: Dict[str, Dict] = {}
+_audit_log: List[Dict] = []
 
 try:
     _cls = joblib.load(ART / 'cls_pass.pkl')
@@ -82,6 +84,54 @@ def tick(batch_id: str, payload: Tick):
     return {'batch_id': batch_id, 'deviation': deviation,
             'pass_prob': prob, 'viscosity': visc}
 
+
+@app.get('/dashboard/kpis')
+def dashboard_kpis():
+    """Return high level KPI cards with status color."""
+    data = [
+        {'name': 'Yield', 'value': 0.95, 'status': 'green'},
+        {'name': 'Throughput', 'value': 0.80, 'status': 'yellow'},
+        {'name': 'Scrap Rate', 'value': 0.15, 'status': 'red'},
+    ]
+    return {'kpis': data}
+
+
+@app.get('/dashboard/trends/{metric}')
+def dashboard_trend(metric: str):
+    """Return simple trend data for a metric."""
+    now = datetime.utcnow()
+    pts = [
+        {'ts': (now - timedelta(minutes=i)).isoformat(), 'value': random.random()}
+        for i in range(10)
+    ][::-1]
+    return {'metric': metric, 'trend': pts}
+
+
+@app.get('/dashboard/stage-kpis')
+def stage_kpis():
+    """Return KPIs for each production stage."""
+    stages = {
+        'mixing': {
+            'temperature': {'value': 98, 'status': 'green'},
+            'pH': {'value': 9.1, 'status': 'yellow'},
+        },
+        'reaction': {
+            'pressure': {'value': 80, 'status': 'red'},
+        },
+    }
+    return {'stages': stages}
+
+
+@app.get('/dashboard/setpoints')
+def recommended_setpoints():
+    """Return recommended setpoint ranges for optimization/SOP."""
+    data = {
+        'temperature': {'low': 95, 'high': 100},
+        'pH': {'low': 8.5, 'high': 9.5},
+        'pressure': {'low': 60, 'high': 75},
+    }
+    return {'setpoints': data}
+
 @app.get('/advice/{batch_id}')
 def advice(batch_id: str):
     st = _state.get(batch_id)
@@ -98,5 +148,6 @@ def advice(batch_id: str):
             adv.append('Temperature profile deviates from prototype')
     if not adv:
         adv.append('Process on track')
+    _audit_log.append({'batch_id': batch_id, 'advice': adv})
     return {'batch_id': batch_id, 'pass_prob': prob,
             'viscosity': st.get('viscosity'), 'advice': adv}
