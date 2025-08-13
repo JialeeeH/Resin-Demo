@@ -5,6 +5,7 @@ import joblib, os, json
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from tslearn.metrics import soft_dtw
 
 app = FastAPI(title='Industrial AI Process Optimization')
 
@@ -14,6 +15,23 @@ ART.mkdir(exist_ok=True)
 # lazy load
 _cls = None
 _reg = None
+_proto = None
+_env_lo = None
+_env_hi = None
+_state: Dict[str, Dict] = {}
+
+try:
+    _cls = joblib.load(ART / 'cls_pass.pkl')
+    _reg = joblib.load(ART / 'reg_viscosity.pkl')
+except Exception as e:
+    print('Model load warning:', e)
+
+try:
+    _proto = np.load(ART / 'proto_step2_T.npy')
+    _env_lo = np.load(ART / 'envlo_step2_T.npy')
+    _env_hi = np.load(ART / 'envhi_step2_T.npy')
+except Exception as e:
+    print('Golden curve load warning:', e)
 
 class Tick(BaseModel):
     ts: str
@@ -31,17 +49,54 @@ def start_batch(batch_id: str, kettle_id: str, process_card_id: str):
 
 @app.post('/batch/{batch_id}/tick')
 def tick(batch_id: str, payload: Tick):
-    # placeholder: would update rolling features & compare to golden-envelope
-    # here we just echo deviation mock
-    T = payload.signals.get('T', 0)
-    deviation = float(max(0.0, abs(T - 96.5) - 1.5))  # pretend envelope ±1.5C around 96.5
-    advice = None
-    if deviation > 2.0:
-        advice = 'Increase dT/dt by 0.3 C/min or extend hold +10 min'
-    return {'batch_id': batch_id, 'deviation': deviation, 'advice': advice}
+    """Update batch state with new signals and run predictions."""
+    st = _state.setdefault(batch_id, {'history': []})
+    st['history'].append(payload.signals)
+
+    df = pd.DataFrame(st['history'])
+    feats = df.mean().to_frame().T
+    deviation = None
+    if _proto is not None:
+        curve = df.get('T', pd.Series(dtype=float)).dropna().values.astype(float)
+        if len(curve) > 1:
+            deviation = float(soft_dtw(curve, _proto))
+    st['deviation'] = deviation
+
+    prob = None
+    if _cls is not None:
+        try:
+            prob = float(_cls.predict_proba(feats)[:, 1][0])
+        except Exception:
+            prob = None
+    st['pass_prob'] = prob
+
+    visc = None
+    if _reg is not None:
+        try:
+            visc = float(_reg.predict(feats)[0])
+        except Exception:
+            visc = None
+    st['viscosity'] = visc
+    st['features'] = feats.iloc[0].to_dict()
+
+    return {'batch_id': batch_id, 'deviation': deviation,
+            'pass_prob': prob, 'viscosity': visc}
 
 @app.get('/advice/{batch_id}')
 def advice(batch_id: str):
-    # static stub
-    return {'batch_id': batch_id, 'stage': 4, 'issue': 'heating slope low',
-            'recommendation': 'Raise heating slope +0.3 C/min or extend hold +12 min'}
+    st = _state.get(batch_id)
+    if not st or st.get('pass_prob') is None:
+        return {'batch_id': batch_id, 'advice': ['Insufficient data']}
+
+    adv = []
+    prob = st.get('pass_prob')
+    dev = st.get('deviation')
+    if prob is not None and prob < 0.7:
+        adv.append('Low pass probability; review process parameters')
+    if dev is not None and _env_hi is not None and _env_lo is not None:
+        if dev > float(np.mean(_env_hi - _env_lo)):
+            adv.append('Temperature profile deviates from prototype')
+    if not adv:
+        adv.append('Process on track')
+    return {'batch_id': batch_id, 'pass_prob': prob,
+            'viscosity': st.get('viscosity'), 'advice': adv}
